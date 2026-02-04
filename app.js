@@ -165,4 +165,43 @@ app.use(() => {
 
 /* ========== 启动 ========== */
 const PORT = process.env.PORT || 3000;
+// ===== 首页伪装（普通企业官网）=====
+app.get('/', (req, res) => {
+  res.send(`
+    <!doctype html>
+    <html lang="zh-CN">
+    <head>
+      <meta charset="utf-8">
+      <title>XX科技有限公司</title>
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <style>
+        body { font-family: Arial; background:#f5f6f7; margin:0 }
+        header { background:#0b5ed7; color:#fff; padding:30px }
+        main { padding:40px }
+        footer { background:#222; color:#aaa; padding:20px; text-align:center }
+      </style>
+    </head>
+    <body>
+      <header>
+        <h1>XX科技有限公司</h1>
+        <p>专注企业信息化解决方案</p>
+      </header>
+      <main>
+        <h2>关于我们</h2>
+        <p>我们为企业提供稳定、安全、高效的技术服务。</p>
+
+        <h2>业务范围</h2>
+        <ul>
+          <li>系统集成</li>
+          <li>云计算服务</li>
+          <li>网络安全</li>
+        </ul>
+      </main>
+      <footer>
+        © 2026 XX Technology Co., Ltd.
+      </footer>
+    </body>
+    </html>
+  `);
+});
 app.listen(PORT, () => console.log('Service Running')); 
