@@ -1,72 +1,49 @@
-const ADMIN_USER = 'admin';
-const ADMIN_PASS = '123456';
 const express = require('express');
 const session = require('express-session');
-const sqlite3 = require('sqlite3').verbose();
-const bcrypt = require('bcrypt');
 const { v4: uuidv4 } = require('uuid');
 
 const app = express();
-const db = new sqlite3.Database('./data.db');
+
+/* ===== 配置 ===== */
+const ADMIN_USER = 'admin';
+const ADMIN_PASS = '123456';
 
 app.set('trust proxy', true);
 app.use(express.urlencoded({ extended: true }));
 
-app.use(session({
-  secret: 'CHANGE_THIS_SECRET_123456',
-  resave: false,
-  saveUninitialized: false
-}));
+app.use(
+  session({
+    secret: 'CHANGE_ME_123456',
+    resave: false,
+    saveUninitialized: false
+  })
+);
 
-/* ========== 工具函数 ========== */
+/* ===== 工具函数：获取真实 IP ===== */
 function getIP(req) {
   return (
     req.headers['x-forwarded-for']?.split(',')[0] ||
-    req.socket.remoteAddress
+    req.socket.remoteAddress ||
+    'unknown'
   );
 }
 
-function auth(req, res, next) {
-  if (!req.session.user) return res.redirect('/login');
-  next();
-}
+/* ===== 内存存储（最简单，先跑通） ===== */
+const logs = [];
+const links = {};
 
-/* ========== 初始化数据库 ========== */
-db.serialize(() => {
-  db.run(`
-    CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      username TEXT UNIQUE,
-      password_hash TEXT
-    )
-  `);
-
-  db.run(`
-    CREATE TABLE IF NOT EXISTS links (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      token TEXT UNIQUE,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-
-  db.run(`
-    CREATE TABLE IF NOT EXISTS visits (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      token TEXT,
-      ip TEXT,
-      user_agent TEXT,
-      visited_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
+/* ===== 首页（解决 Cannot GET /） ===== */
+app.get('/', (req, res) => {
+  res.send('服务已启动');
 });
 
-/* ========== 登录 ========== */
+/* ===== 登录 ===== */
 app.get('/login', (req, res) => {
   res.send(`
-    <h2>后台登录</h2>
-    <form method="post">
-      <input name="username" placeholder="用户名" required /><br><br>
-      <input name="password" type="password" placeholder="密码" required /><br><br>
+    <h2>登录</h2>
+    <form method="POST">
+      <input name="username" placeholder="用户名" /><br/>
+      <input name="password" type="password" placeholder="密码" /><br/>
       <button>登录</button>
     </form>
   `);
@@ -74,85 +51,64 @@ app.get('/login', (req, res) => {
 
 app.post('/login', (req, res) => {
   const { username, password } = req.body;
-
-  db.get(
-    'SELECT * FROM users WHERE username=?',
-    username,
-    async (err, user) => {
-      if (!user) return res.send('用户名或密码错误');
-
-      const ok = await bcrypt.compare(password, user.password_hash);
-      if (!ok) return res.send('用户名或密码错误');
-
-      req.session.user = username;
-      res.redirect('/admin');
-    }
-  );
+  if (username === ADMIN_USER && password === ADMIN_PASS) {
+    req.session.user = username;
+    return res.redirect('/admin');
+  }
+  res.send('登录失败');
 });
 
-/* ========== 后台首页 ========== */
-app.get('/admin', auth, (req, res) => {
+/* ===== 后台 ===== */
+app.get('/admin', (req, res) => {
+  if (!req.session.user) return res.redirect('/login');
+
+  const linkList = Object.keys(links)
+    .map(id => `<li>${id}</li>`)
+    .join('');
+
+  const logList = logs
+    .map(l => `<li>${l.time} | ${l.ip} | ${l.id}</li>`)
+    .join('');
+
   res.send(`
-    <h2>后台管理</h2>
-    <p>当前用户：${req.session.user}</p>
-    <a href="/admin/create">生成随机链接</a><br><br>
-    <a href="/admin/visits">查看访问记录</a><br><br>
-    <a href="/logout">退出登录</a>
+    <h2>后台</h2>
+    <form method="POST" action="/admin/create">
+      <button>生成随机链接</button>
+    </form>
+
+    <h3>链接</h3>
+    <ul>${linkList}</ul>
+
+    <h3>访问记录</h3>
+    <ul>${logList}</ul>
   `);
 });
 
-/* ========== 生成链接 ========== */
-app.get('/admin/create', auth, (req, res) => {
-  const token = uuidv4().replace(/-/g, '');
-  db.run('INSERT INTO links (token) VALUES (?)', token);
-  res.send(`
-    <p>生成成功：</p>
-    <code>/l/${token}</code><br><br>
-    <a href="/admin">返回后台</a>
-  `);
+/* ===== 生成随机链接 ===== */
+app.post('/admin/create', (req, res) => {
+  if (!req.session.user) return res.redirect('/login');
+
+  const id = uuidv4();
+  links[id] = true;
+  res.redirect('/admin');
 });
 
-/* ========== 访问链接 ========== */
-app.get('/l/:token', (req, res) => {
-  const ip = getIP(req);
+/* ===== 对方访问的链接 ===== */
+app.get('/l/:id', (req, res) => {
+  const { id } = req.params;
+  if (!links[id]) return res.status(404).send('链接不存在');
 
-  db.run(
-    'INSERT INTO visits (token, ip, user_agent) VALUES (?, ?, ?)',
-    [req.params.token, ip, req.headers['user-agent']]
-  );
+  logs.push({
+    id,
+    ip: getIP(req),
+    time: new Date().toLocaleString()
+  });
 
-  res.send('访问成功');
+  res.send('已访问');
 });
 
-/* ========== 查看记录 ========== */
-app.get('/admin/visits', auth, (req, res) => {
-  db.all(
-    'SELECT * FROM visits ORDER BY visited_at DESC',
-    (err, rows) => {
-      let html = '<h2>访问记录</h2><table border="1"><tr><th>链接</th><th>IP</th><th>UA</th><th>时间</th></tr>';
-      rows.forEach(r => {
-        html += `<tr>
-          <td>${r.token}</td>
-          <td>${r.ip}</td>
-          <td>${r.user_agent}</td>
-          <td>${r.visited_at}</td>
-        </tr>`;
-      });
-      html += '</table><br><a href="/admin">返回后台</a>';
-      res.send(html);
-    }
-  );
-});
-
-/* ========== 退出 ========== */
-app.get('/logout', (req, res) => {
-  req.session.destroy(() => res.redirect('/login'));
-});
-
-/* ========== 启动 ========== */
-app.get('/', (req, res) => {
-  res.send('服务已启动');
-});
-app.listen(3000, () => {
-  console.log('网站已启动：http://localhost:3000');
-});
+/* ===== 启动 ===== */
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log('服务已启动');
+}); 
