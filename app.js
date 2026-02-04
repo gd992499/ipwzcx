@@ -1,140 +1,177 @@
 const express = require('express');
 const session = require('express-session');
-const bcrypt = require('bcrypt');
-const sqlite3 = require('sqlite3').verbose();
-const rateLimit = require('express-rate-limit');
+const crypto = require('crypto');
+const bodyParser = require('body-parser');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
 
-/* ===== 基础设置 ===== */
-app.set('trust proxy', true);
-app.use(express.urlencoded({ extended: true }));
+/* ================== 基础配置 ================== */
+
+// Railway 必须
+const PORT = process.env.PORT || 8080;
+
+// 管理员账号（强烈建议在 Railway 里设置环境变量）
+const ADMIN_USER = process.env.ADMIN_USER || 'admin';
+const ADMIN_PASS = process.env.ADMIN_PASS || 'admin123';
+
+// session 密钥
+const SESSION_SECRET = process.env.SESSION_SECRET || 'change_this_secret';
+
+// 内存存储（演示用）
+const links = {};        // { token: { createdAt } }
+const visitLogs = [];   // 访问记录
+const loginFails = {};  // 简单防爆破
+
+/* ================== 中间件 ================== */
+
+app.use(bodyParser.urlencoded({ extended: false }));
+app.use(bodyParser.json());
 
 app.use(session({
-  name: 'site_session',
-  secret: 'CHANGE_THIS_SECRET',
+  name: 'site.sid',
+  secret: SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
-  cookie: {
-    httpOnly: true,
-    sameSite: 'lax'
-  }
 }));
 
-/* ===== 数据库 ===== */
-const db = new sqlite3.Database('./data.db');
+/* ================== 工具函数 ================== */
 
-db.serialize(() => {
-  db.run(`
-    CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      username TEXT UNIQUE,
-      password TEXT
-    )
-  `);
+function isLoggedIn(req) {
+  return req.session && req.session.loggedIn;
+}
 
-  // 初始化管理员账号（只会执行一次）
-  db.get(`SELECT COUNT(*) AS c FROM users`, async (err, row) => {
-    if (row.c === 0) {
-      const hash = await bcrypt.hash('admin123', 10);
-      db.run(`INSERT INTO users (username, password) VALUES (?, ?)`,
-        ['admin', hash]);
-      console.log('初始化账号：admin / admin123');
-    }
-  });
-});
-
-/* ===== 防爆破（仅登录接口） ===== */
-const loginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 5,
-  standardHeaders: true,
-  legacyHeaders: false
-});
-
-/* ===== 登录校验 ===== */
 function requireLogin(req, res, next) {
-  if (!req.session.user) {
+  if (!isLoggedIn(req)) {
     return res.redirect('/login');
   }
   next();
 }
 
-/* ===== 首页（伪装为企业官网） ===== */
+function getClientIP(req) {
+  return (
+    req.headers['cf-connecting-ip'] ||
+    req.headers['x-forwarded-for'] ||
+    req.socket.remoteAddress ||
+    ''
+  );
+}
+
+/* ================== 页面 ================== */
+
+// 首页（普通企业风格占位）
 app.get('/', (req, res) => {
   res.send(`
-    <html>
-    <head><title>XX科技有限公司</title></head>
-    <body style="font-family:sans-serif">
-      <h1>XX科技有限公司</h1>
-      <p>我们致力于提供高质量的信息化解决方案。</p>
-      <p>联系方式：contact@example.com</p>
-    </body>
-    </html>
+    <h1>Welcome</h1>
+    <p>Official Website</p>
   `);
 });
 
-/* ===== 登录页 ===== */
+/* ---------- 登录 ---------- */
+
 app.get('/login', (req, res) => {
   res.send(`
-    <h2>后台登录</h2>
-    <form method="POST">
-      <input name="username" placeholder="用户名"/><br/>
-      <input type="password" name="password" placeholder="密码"/><br/>
-      <button>登录</button>
+    <h2>Admin Login</h2>
+    <form method="post">
+      <input name="username" placeholder="Username"/><br/>
+      <input name="password" type="password" placeholder="Password"/><br/>
+      <button>Login</button>
     </form>
   `);
 });
 
-/* ===== 登录处理 ===== */
-app.post('/login', loginLimiter, (req, res) => {
+app.post('/login', (req, res) => {
+  const ip = getClientIP(req);
+  const now = Date.now();
+
+  // 简单防爆破：10 分钟 5 次
+  loginFails[ip] = loginFails[ip] || [];
+  loginFails[ip] = loginFails[ip].filter(t => now - t < 10 * 60 * 1000);
+
+  if (loginFails[ip].length >= 5) {
+    return res.send('Too many attempts, try later.');
+  }
+
   const { username, password } = req.body;
 
-  db.get(`SELECT * FROM users WHERE username = ?`, [username], async (err, user) => {
-    if (!user) return res.send('账号或密码错误');
+  if (username === ADMIN_USER && password === ADMIN_PASS) {
+    req.session.loggedIn = true;
+    loginFails[ip] = [];
+    return res.redirect('/admin');
+  } else {
+    loginFails[ip].push(now);
+    return res.send('Login failed');
+  }
+});
 
-    const ok = await bcrypt.compare(password, user.password);
-    if (!ok) return res.send('账号或密码错误');
+/* ---------- 后台 ---------- */
 
-    req.session.user = user.username;
-    res.redirect('/dashboard');
+app.get('/admin', requireLogin, (req, res) => {
+  const list = visitLogs.map(v => `
+    <tr>
+      <td>${v.time}</td>
+      <td>${v.ip}</td>
+      <td>${v.ua}</td>
+      <td>${v.token}</td>
+    </tr>
+  `).join('');
+
+  res.send(`
+    <h2>Admin Panel</h2>
+    <a href="/admin/new">Generate Link</a> |
+    <a href="/logout">Logout</a>
+    <table border="1" cellpadding="5">
+      <tr>
+        <th>Time</th><th>IP</th><th>User-Agent</th><th>Token</th>
+      </tr>
+      ${list}
+    </table>
+  `);
+});
+
+app.get('/admin/new', requireLogin, (req, res) => {
+  const token = crypto.randomBytes(6).toString('hex');
+  links[token] = { createdAt: new Date() };
+
+  const url = `${req.protocol}://${req.get('host')}/v/${token}`;
+
+  res.send(`
+    <p>Link created:</p>
+    <code>${url}</code><br/><br/>
+    <a href="/admin">Back</a>
+  `);
+});
+
+app.get('/logout', (req, res) => {
+  req.session.destroy(() => {
+    res.redirect('/');
   });
 });
 
-/* ===== 后台 ===== */
-app.get('/dashboard', requireLogin, (req, res) => {
+/* ---------- 访问记录 ---------- */
+
+app.get('/v/:token', (req, res) => {
+  const { token } = req.params;
+
+  if (!links[token]) {
+    return res.status(404).send('Not Found');
+  }
+
+  visitLogs.push({
+    token,
+    ip: getClientIP(req),
+    ua: req.headers['user-agent'] || '',
+    time: new Date().toLocaleString(),
+  });
+
   res.send(`
-    <h2>后台管理</h2>
-    <p>当前用户：${req.session.user}</p>
-    <a href="/change-password">修改密码</a><br/>
-    <a href="/logout">退出</a>
+    <h1>Thank you</h1>
+    <p>Your visit has been recorded.</p>
   `);
 });
 
-/* ===== 修改密码 ===== */
-app.get('/change-password', requireLogin, (req, res) => {
-  res.send(`
-    <form method="POST">
-      <input type="password" name="password" placeholder="新密码"/>
-      <button>修改</button>
-    </form>
-  `);
-});
+/* ================== 启动 ================== */
 
-app.post('/change-password', requireLogin, async (req, res) => {
-  const hash = await bcrypt.hash(req.body.password, 10);
-  db.run(`UPDATE users SET password = ? WHERE username = ?`,
-    [hash, req.session.user]);
-  res.send('密码已修改');
-});
-
-/* ===== 退出 ===== */
-app.get('/logout', (req, res) => {
-  req.session.destroy(() => res.redirect('/'));
-});
-
-/* ===== 启动 ===== */
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log('服务运行在端口', PORT);
-}); 
+  console.log(`初始化账号：${ADMIN_USER} / ${ADMIN_PASS}`);
+});
