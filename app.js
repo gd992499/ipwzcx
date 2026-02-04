@@ -1,4 +1,6 @@
- const express = require('express');
+const ADMIN_USER = 'admin';
+const ADMIN_PASS = '123456';
+const express = require('express');
 const session = require('express-session');
 const sqlite3 = require('sqlite3').verbose();
 const bcrypt = require('bcrypt');
