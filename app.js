@@ -148,6 +148,9 @@ app.get('/logout', (req, res) => {
 });
 
 /* ========== 启动 ========== */
+app.get('/', (req, res) => {
+  res.send('服务已启动');
+});
 app.listen(3000, () => {
   console.log('网站已启动：http://localhost:3000');
 });
